@@ -5,18 +5,20 @@ import pkg from 'pg';
 import bcryptjs from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import bodyParser from 'body-parser';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
 
 const { Pool } = pkg;
 const app = express();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// ============ MIDDLEWARE ============
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.json());
 
-// ============ DATABASE CONNECTION ============
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -28,12 +30,10 @@ pool.on('error', (err) => {
   console.error('Unexpected error on idle client', err);
 });
 
-// ============ INITIALIZE DATABASE ============
 async function initializeDatabase() {
   try {
     console.log('🔄 Initializing database...');
     
-    // Create users table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -47,7 +47,6 @@ async function initializeDatabase() {
       );
     `);
 
-    // Create reservations table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS reservations (
         id SERIAL PRIMARY KEY,
@@ -67,7 +66,6 @@ async function initializeDatabase() {
       );
     `);
 
-    // Create index for faster queries
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_reservations_user_id ON reservations(user_id);
       CREATE INDEX IF NOT EXISTS idx_reservations_check_in ON reservations(check_in);
@@ -80,14 +78,10 @@ async function initializeDatabase() {
   }
 }
 
-// ============ AUTHENTICATION ROUTES ============
-
-// Register
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, hotelName, hotelAddress, roomsCount } = req.body;
 
-    // Validation
     if (!email || !password || !hotelName) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -96,10 +90,8 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
-    // Hash password
     const hashedPassword = await bcryptjs.hash(password, 10);
 
-    // Insert user
     const result = await pool.query(
       'INSERT INTO users (email, password, hotel_name, hotel_address, rooms_count) VALUES ($1, $2, $3, $4, $5) RETURNING id, email, hotel_name, hotel_address, rooms_count',
       [email, hashedPassword, hotelName, hotelAddress || '', roomsCount || 10]
@@ -127,7 +119,6 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// Login
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -167,7 +158,6 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// ============ AUTH MIDDLEWARE ============
 const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
 
@@ -184,9 +174,6 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-// ============ USER ROUTES ============
-
-// Get current user info
 app.get('/api/user/profile', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, email, hotel_name, hotel_address, rooms_count, created_at FROM users WHERE id = $1', [req.userId]);
@@ -210,15 +197,10 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
   }
 });
 
-// ============ RESERVATION ROUTES ============
-
-// Get all reservations for user
 app.get('/api/reservations', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT * FROM reservations 
-       WHERE user_id = $1 
-       ORDER BY check_in DESC`,
+      `SELECT * FROM reservations WHERE user_id = $1 ORDER BY check_in DESC`,
       [req.userId]
     );
 
@@ -244,7 +226,6 @@ app.get('/api/reservations', authMiddleware, async (req, res) => {
   }
 });
 
-// Add a new reservation
 app.post('/api/reservations', authMiddleware, async (req, res) => {
   try {
     const { room, checkIn, checkOut, guestName, guestEmail, guestPhone, source, amount, status, notes } = req.body;
@@ -255,8 +236,7 @@ app.post('/api/reservations', authMiddleware, async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO reservations (user_id, room, check_in, check_out, guest_name, guest_email, guest_phone, source, amount, status, notes) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
-       RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
       [req.userId, room, checkIn, checkOut, guestName, guestEmail || '', guestPhone || '', source || 'manual', amount || 0, status || 'confirmed', notes || '']
     );
 
@@ -281,116 +261,7 @@ app.post('/api/reservations', authMiddleware, async (req, res) => {
   }
 });
 
-// Update a reservation
 app.put('/api/reservations/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
-    const { room, checkIn, checkOut, guestName, guestEmail, guestPhone, source, amount, status, notes } = req.body;
-
-    // Verify ownership
-    const checkOwnership = await pool.query(
-      'SELECT user_id FROM reservations WHERE id = $1',
-      [id]
-    );
-
-    if (checkOwnership.rows.length === 0 || checkOwnership.rows[0].user_id !== req.userId) {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
-
-    const result = await pool.query(
-      `UPDATE reservations 
-       SET room = $1, check_in = $2, check_out = $3, guest_name = $4, guest_email = $5, guest_phone = $6, source = $7, amount = $8, status = $9, notes = $10, updated_at = CURRENT_TIMESTAMP 
-       WHERE id = $11 
-       RETURNING *`,
-      [room, checkIn, checkOut, guestName, guestEmail || '', guestPhone || '', source, amount || 0, status, notes || '', id]
-    );
-
-    const r = result.rows[0];
-    res.json({
-      id: r.id,
-      room: r.room,
-      checkIn: r.check_in,
-      checkOut: r.check_out,
-      guestName: r.guest_name,
-      guestEmail: r.guest_email,
-      guestPhone: r.guest_phone,
-      source: r.source,
-      amount: r.amount,
-      status: r.status,
-      notes: r.notes,
-      updatedAt: r.updated_at,
-    });
-  } catch (error) {
-    console.error('Update reservation error:', error);
-    res.status(500).json({ error: 'Failed to update reservation' });
-  }
-});
-
-// Delete a reservation
-app.delete('/api/reservations/:id', authMiddleware, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    // Verify ownership
-    const checkOwnership = await pool.query(
-      'SELECT user_id FROM reservations WHERE id = $1',
-      [id]
-    );
-
-    if (checkOwnership.rows.length === 0 || checkOwnership.rows[0].user_id !== req.userId) {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
-
-    await pool.query('DELETE FROM reservations WHERE id = $1', [id]);
-
-    res.json({ message: 'Reservation deleted' });
-  } catch (error) {
-    console.error('Delete reservation error:', error);
-    res.status(500).json({ error: 'Failed to delete reservation' });
-  }
-});
-
-// ============ STATS ROUTES ============
-
-app.get('/api/stats', authMiddleware, async (req, res) => {
-  try {
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    // Get reservations from last 30 days
-    const result = await pool.query(
-      `SELECT * FROM reservations 
-       WHERE user_id = $1 AND check_in >= $2`,
-      [req.userId, thirtyDaysAgo.toISOString().split('T')[0]]
-    );
-
-    const reservations = result.rows;
-    const totalRevenue = reservations.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
-    const reservationCount = reservations.length;
-
-    res.json({
-      totalRevenue: Math.round(totalRevenue * 100) / 100,
-      reservationCount,
-      averageNightly: reservationCount > 0 ? Math.round((totalRevenue / reservationCount) * 100) / 100 : 0,
-      period: '30 days',
-    });
-  } catch (error) {
-    console.error('Stats error:', error);
-    res.status(500).json({ error: 'Failed to fetch stats' });
-  }
-});
-
-// ============ HEALTH CHECK ============
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'ReserveFlow backend is running' });
-});
-
-// ============ START SERVER ============
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, async () => {
-  console.log(`🚀 ReserveFlow Backend running on port ${PORT}`);
-  await initializeDatabase();
-});
-
-export default app;
+    const { room, checkIn, checkOut, guestName, guestEmail, guestPhone, source, amount, status, notes } =
