@@ -264,4 +264,105 @@ app.post('/api/reservations', authMiddleware, async (req, res) => {
 app.put('/api/reservations/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
-    const { room, checkIn, checkOut, guestName, guestEmail, guestPhone, source, amount, status, notes } =
+    const { room, checkIn, checkOut, guestName, guestEmail, guestPhone, source, amount, status, notes } = req.body;
+
+    const checkOwnership = await pool.query(
+      'SELECT user_id FROM reservations WHERE id = $1',
+      [id]
+    );
+
+    if (checkOwnership.rows.length === 0 || checkOwnership.rows[0].user_id !== req.userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    const result = await pool.query(
+      `UPDATE reservations SET room = $1, check_in = $2, check_out = $3, guest_name = $4, guest_email = $5, guest_phone = $6, source = $7, amount = $8, status = $9, notes = $10, updated_at = CURRENT_TIMESTAMP WHERE id = $11 RETURNING *`,
+      [room, checkIn, checkOut, guestName, guestEmail || '', guestPhone || '', source, amount || 0, status, notes || '', id]
+    );
+
+    const r = result.rows[0];
+    res.json({
+      id: r.id,
+      room: r.room,
+      checkIn: r.check_in,
+      checkOut: r.check_out,
+      guestName: r.guest_name,
+      guestEmail: r.guest_email,
+      guestPhone: r.guest_phone,
+      source: r.source,
+      amount: r.amount,
+      status: r.status,
+      notes: r.notes,
+      updatedAt: r.updated_at,
+    });
+  } catch (error) {
+    console.error('Update reservation error:', error);
+    res.status(500).json({ error: 'Failed to update reservation' });
+  }
+});
+
+app.delete('/api/reservations/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const checkOwnership = await pool.query(
+      'SELECT user_id FROM reservations WHERE id = $1',
+      [id]
+    );
+
+    if (checkOwnership.rows.length === 0 || checkOwnership.rows[0].user_id !== req.userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    await pool.query('DELETE FROM reservations WHERE id = $1', [id]);
+    res.json({ message: 'Reservation deleted' });
+  } catch (error) {
+    console.error('Delete reservation error:', error);
+    res.status(500).json({ error: 'Failed to delete reservation' });
+  }
+});
+
+app.get('/api/stats', authMiddleware, async (req, res) => {
+  try {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const result = await pool.query(
+      `SELECT * FROM reservations WHERE user_id = $1 AND check_in >= $2`,
+      [req.userId, thirtyDaysAgo.toISOString().split('T')[0]]
+    );
+
+    const reservations = result.rows;
+    const totalRevenue = reservations.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
+    const reservationCount = reservations.length;
+
+    res.json({
+      totalRevenue: Math.round(totalRevenue * 100) / 100,
+      reservationCount,
+      averageNightly: reservationCount > 0 ? Math.round((totalRevenue / reservationCount) * 100) / 100 : 0,
+      period: '30 days',
+    });
+  } catch (error) {
+    console.error('Stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'OK', message: 'ReserveFlow backend is running' });
+});
+
+app.use(express.static(path.join(__dirname, 'build')));
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'build', 'index.html'));
+});
+
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, async () => {
+  console.log(`🚀 ReserveFlow Backend running on port ${PORT}`);
+  await initializeDatabase();
+});
+
+export default app;
